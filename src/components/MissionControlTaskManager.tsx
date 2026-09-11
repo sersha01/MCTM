@@ -15,26 +15,60 @@ import { SearchBar } from "./mission-control/SearchBar";
 
 type Listener = () => void;
 
+interface TaskStoreSnapshot {
+  tasks: Task[];
+  counts: { all: number; active: number; completed: number };
+  loading: boolean;
+  error: string | null;
+}
+
 class TaskStore {
-  tasks: Task[] = [];
-  counts = { all: 0, active: 0, completed: 0 };
-  loading = true;
-  error: string | null = null;
+  private tasks: Task[] = [];
+  private counts = { all: 0, active: 0, completed: 0 };
+  private loading = true;
+  private error: string | null = null;
   private listeners = new Set<Listener>();
+
+  /**
+   * Cached snapshot — must be referentially stable between mutations,
+   * as required by useSyncExternalStore.
+   */
+  private snapshot: TaskStoreSnapshot;
+
+  constructor(initialTasks?: Task[]) {
+    if (initialTasks) {
+      this.tasks = initialTasks;
+      this.loading = false;
+      this.recomputeCounts();
+    }
+    this.snapshot = this.buildSnapshot();
+  }
 
   subscribe = (listener: Listener) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
 
-  getSnapshot = () => ({
-    tasks: this.tasks,
-    counts: this.counts,
-    loading: this.loading,
-    error: this.error,
-  });
+  getSnapshot = (): TaskStoreSnapshot => this.snapshot;
+
+  /**
+   * Server snapshot. The store is constructed from the same
+   * initialTasks prop during SSR and hydration, so the snapshots
+   * match — no hydration mismatch.
+   */
+  getServerSnapshot = (): TaskStoreSnapshot => this.snapshot;
+
+  private buildSnapshot(): TaskStoreSnapshot {
+    return {
+      tasks: this.tasks,
+      counts: this.counts,
+      loading: this.loading,
+      error: this.error,
+    };
+  }
 
   private emit() {
+    this.snapshot = this.buildSnapshot();
     this.listeners.forEach((l) => l());
   }
 
@@ -129,17 +163,19 @@ function sortTasks(tasks: Task[]): Task[] {
 
 export function MissionControlTaskManager({ initialTasks }: { initialTasks: Task[] }) {
   const storeRef = useRef<TaskStore | null>(null);
-  if (!storeRef.current) storeRef.current = new TaskStore();
+  if (!storeRef.current) storeRef.current = new TaskStore(initialTasks);
   const store = storeRef.current;
 
   useEffect(() => {
-    store.tasks = initialTasks;
-    store.loading = false;
-    store.refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    // After hydration, start syncing with the live task service.
+    void store.refresh();
+  }, [store]);
 
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getServerSnapshot
+  );
 
   const [filter, setFilter] = useState<TaskListFilter>("ALL");
   const [searchQuery, setSearchQuery] = useState("");
